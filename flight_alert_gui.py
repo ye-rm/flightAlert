@@ -616,14 +616,16 @@ class FlightAlertApp:
                 self._wait_with_check(RETRY_DELAY)
     
     def _wait_with_check(self, seconds: int) -> None:
-        """等待指定秒数，同时检查运行状态
-        
+        """等待指定秒数，同时检查运行状态并显示倒计时
+
         Args:
             seconds: 等待秒数
         """
         for i in range(seconds):
             if not self.running:
                 return
+            remaining = seconds - i
+            self._update_status(f"下次检查将在 {remaining} 秒后进行")
             time.sleep(1)
     
     def _push_message(self, message: str, token: str) -> bool:
