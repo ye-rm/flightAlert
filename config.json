@@ -1,7 +1,12 @@
 {
-    "dateToGo": ["20240821", "20240822", "20240823", "20240824"],
-    "placeFrom": "TNA",
-    "placeTo": "KMG",
+    "dateToGo": [
+        "20251105",
+        "20251106",
+        "20251107",
+        "20251111"
+    ],
+    "placeFrom": "KMG",
+    "placeTo": "TNA",
     "flightWay": "Oneway",
     "sleepTime": 600,
     "priceStep": 50,
