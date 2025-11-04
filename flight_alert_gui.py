@@ -276,25 +276,40 @@ class FlightAlertApp:
         """保存配置到文件"""
         try:
             # 解析并验证日期
-            dates = [date.strip() for date in self.dates_var.get().split(",") if date.strip()]
-            
+            dates = [date.strip()
+                     for date in self.dates_var.get().split(",") if date.strip()]
+
             # 验证配置
             if not dates:
                 raise ValueError("请至少输入一个日期")
-            
-            place_from = self.place_from_var.get().strip()
-            place_to = self.place_to_var.get().strip()
-            
+
+            place_from = self.place_from_var.get().strip().upper()
+            place_to = self.place_to_var.get().strip().upper()
+
             if not place_from:
                 raise ValueError("请输入出发机场代码")
             if not place_to:
                 raise ValueError("请输入到达机场代码")
-            
-            # 验证日期格式
+
+            # 验证机场代码格式（应为3个字母）
+            if len(place_from) != 3 or not place_from.isalpha():
+                raise ValueError(
+                    f"出发机场代码格式错误: {place_from}，应为3个字母的IATA代码")
+            if len(place_to) != 3 or not place_to.isalpha():
+                raise ValueError(
+                    f"到达机场代码格式错误: {place_to}，应为3个字母的IATA代码")
+
+            # 验证日期格式和有效性
             for date in dates:
                 if len(date) != 8 or not date.isdigit():
-                    raise ValueError(f"日期格式错误: {date}，应为8位数字 (YYYYMMDD)")
-            
+                    raise ValueError(
+                        f"日期格式错误: {date}，应为8位数字 (YYYYMMDD)")
+                # 验证日期是否有效
+                try:
+                    datetime.strptime(date, '%Y%m%d')
+                except ValueError:
+                    raise ValueError(f"无效日期: {date}")
+
             # 验证数值
             try:
                 sleep_time = int(self.sleep_time_var.get())
@@ -302,31 +317,31 @@ class FlightAlertApp:
                     raise ValueError("检查间隔必须大于0")
             except ValueError:
                 raise ValueError("检查间隔必须是有效的正整数")
-            
+
             try:
                 price_step = int(self.price_step_var.get())
                 if price_step <= 0:
                     raise ValueError("价格变动阈值必须大于0")
             except ValueError:
                 raise ValueError("价格变动阈值必须是有效的正整数")
-            
+
             config = {
                 "dateToGo": dates,
-                "placeFrom": place_from.upper(),
-                "placeTo": place_to.upper(),
+                "placeFrom": place_from,
+                "placeTo": place_to,
                 "flightWay": self.flight_way_var.get(),
                 "sleepTime": sleep_time,
                 "priceStep": price_step,
                 "SCKEY": self.sckey_var.get().strip()
             }
-            
+
             # 获取配置路径
             config_path = os.path.join(self.config_dir, 'config.json')
-            
+
             # 保存配置
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
-            
+
             self._log(f"配置保存成功: {config_path}")
             messagebox.showinfo("成功", "配置保存成功")
         except ValueError as e:

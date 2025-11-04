@@ -86,6 +86,16 @@ def load_config() -> dict:
                 config['dateToGo'], list):
             raise ValueError("dateToGo 必须是一个非空列表")
 
+        # 验证日期格式和有效性
+        from datetime import datetime
+        for date in config['dateToGo']:
+            if not isinstance(date, str) or len(date) != 8 or not date.isdigit():
+                raise ValueError(f"日期格式错误: {date}，应为8位数字 (YYYYMMDD)")
+            try:
+                datetime.strptime(date, '%Y%m%d')
+            except ValueError:
+                raise ValueError(f"无效日期: {date}")
+
         # 验证数值类型
         if not isinstance(
                 config['sleepTime'], int) or config['sleepTime'] <= 0:
