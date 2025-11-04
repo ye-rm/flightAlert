@@ -7,7 +7,25 @@ from tkinter import ttk, scrolledtext, messagebox
 import requests
 from datetime import datetime
 import sys
+import logging
+from typing import Dict
 from PIL import Image, ImageTk
+
+# 常量定义
+BASE_URL = "https://flights.ctrip.com/itinerary/api/12808/lowestPrice?"
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
+RETRY_DELAY = 30
+REQUEST_TIMEOUT = 10
+DEFAULT_SLEEP_TIME = 600
+DEFAULT_PRICE_STEP = 50
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 class FlightAlertApp:
     def __init__(self, root):
@@ -34,8 +52,8 @@ class FlightAlertApp:
         self.place_from_var = tk.StringVar()
         self.place_to_var = tk.StringVar()
         self.flight_way_var = tk.StringVar(value="Oneway")
-        self.sleep_time_var = tk.StringVar(value="600")
-        self.price_step_var = tk.StringVar(value="50")
+        self.sleep_time_var = tk.StringVar(value=str(DEFAULT_SLEEP_TIME))
+        self.price_step_var = tk.StringVar(value=str(DEFAULT_PRICE_STEP))
         self.sckey_var = tk.StringVar()
         
         # 监控状态
@@ -136,10 +154,13 @@ class FlightAlertApp:
             if os.path.exists(icon_path):
                 icon_img = Image.open(icon_path).resize((32, 32))
                 icon_photo = ImageTk.PhotoImage(icon_img)
-                icon_label = ttk.Label(header_frame, image=icon_photo, background=self.bg_color)
+                icon_label = ttk.Label(
+                    header_frame,
+                    image=icon_photo,
+                    background=self.bg_color)
                 icon_label.image = icon_photo  # 保持引用
                 icon_label.pack(side=tk.LEFT, padx=(0, 10))
-        except:
+        except (FileNotFoundError, OSError):
             pass
         
         ttk.Label(header_frame, text="航班价格监控配置", style="Title.TLabel").pack(side=tk.LEFT)
@@ -252,24 +273,52 @@ class FlightAlertApp:
         self._log("请在配置页面设置监控参数，然后点击开始监控按钮")
     
     def _save_config(self):
+        """保存配置到文件"""
         try:
-            config = {
-                "dateToGo": [date.strip() for date in self.dates_var.get().split(",")],
-                "placeFrom": self.place_from_var.get(),
-                "placeTo": self.place_to_var.get(),
-                "flightWay": self.flight_way_var.get(),
-                "sleepTime": int(self.sleep_time_var.get()),
-                "priceStep": int(self.price_step_var.get()),
-                "SCKEY": self.sckey_var.get()
-            }
+            # 解析并验证日期
+            dates = [date.strip() for date in self.dates_var.get().split(",") if date.strip()]
             
             # 验证配置
-            if not config["dateToGo"] or "" in config["dateToGo"]:
+            if not dates:
                 raise ValueError("请至少输入一个日期")
-            if not config["placeFrom"]:
+            
+            place_from = self.place_from_var.get().strip()
+            place_to = self.place_to_var.get().strip()
+            
+            if not place_from:
                 raise ValueError("请输入出发机场代码")
-            if not config["placeTo"]:
+            if not place_to:
                 raise ValueError("请输入到达机场代码")
+            
+            # 验证日期格式
+            for date in dates:
+                if len(date) != 8 or not date.isdigit():
+                    raise ValueError(f"日期格式错误: {date}，应为8位数字 (YYYYMMDD)")
+            
+            # 验证数值
+            try:
+                sleep_time = int(self.sleep_time_var.get())
+                if sleep_time <= 0:
+                    raise ValueError("检查间隔必须大于0")
+            except ValueError:
+                raise ValueError("检查间隔必须是有效的正整数")
+            
+            try:
+                price_step = int(self.price_step_var.get())
+                if price_step <= 0:
+                    raise ValueError("价格变动阈值必须大于0")
+            except ValueError:
+                raise ValueError("价格变动阈值必须是有效的正整数")
+            
+            config = {
+                "dateToGo": dates,
+                "placeFrom": place_from.upper(),
+                "placeTo": place_to.upper(),
+                "flightWay": self.flight_way_var.get(),
+                "sleepTime": sleep_time,
+                "priceStep": price_step,
+                "SCKEY": self.sckey_var.get().strip()
+            }
             
             # 获取配置路径
             config_path = os.path.join(self.config_dir, 'config.json')
@@ -280,6 +329,9 @@ class FlightAlertApp:
             
             self._log(f"配置保存成功: {config_path}")
             messagebox.showinfo("成功", "配置保存成功")
+        except ValueError as e:
+            self._log(f"配置验证失败: {str(e)}")
+            messagebox.showerror("错误", str(e))
         except Exception as e:
             self._log(f"保存配置出错: {str(e)}")
             messagebox.showerror("错误", f"保存配置失败: {str(e)}")
@@ -371,50 +423,58 @@ class FlightAlertApp:
         self._log("价格监控已停止")
     
     def _monitor_prices(self):
-        baseUrl = "https://flights.ctrip.com/itinerary/api/12808/lowestPrice?"
-        
+        """监控价格主循环"""
         while self.running:
             try:
                 # 更新状态
                 self._update_status(f"正在检查价格 ({datetime.now().strftime('%H:%M:%S')})")
                 
-                # 获取直飞和非直飞航班价格
-                direct_url = f'{baseUrl}flightWay={self.config["flightWay"]}&dcity={self.config["placeFrom"]}&acity={self.config["placeTo"]}&direct=true&army=false'
-                non_direct_url = f'{baseUrl}flightWay={self.config["flightWay"]}&dcity={self.config["placeFrom"]}&acity={self.config["placeTo"]}&army=false'
+                # 构建请求参数
+                params_base = {
+                    'flightWay': self.config["flightWay"],
+                    'dcity': self.config["placeFrom"],
+                    'acity': self.config["placeTo"],
+                    'army': 'false'
+                }
                 
-                self._log(f"正在请求直飞航班数据...")
-                direct_response = requests.get(direct_url)
+                # 获取直飞航班价格
+                self._log("正在请求直飞航班数据...")
+                params_direct = {**params_base, 'direct': 'true'}
                 
-                if direct_response.status_code != 200 or direct_response.json()["status"] == 2:
-                    self._log("获取直飞航班数据失败，将在30秒后重试")
+                try:
+                    direct_response = requests.get(BASE_URL, params=params_direct, timeout=REQUEST_TIMEOUT)
+                    direct_response.raise_for_status()
+                    direct_data = direct_response.json()
+                    
+                    if direct_data.get("status") == 2:
+                        raise ValueError(f"API返回错误: {direct_data.get('msg', '未知错误')}")
+                    
+                except (requests.exceptions.RequestException, ValueError) as e:
+                    self._log(f"获取直飞航班数据失败: {e}，将在{RETRY_DELAY}秒后重试")
                     self._update_prices_display("获取直飞航班数据失败")
-                    
-                    # 等待重试
-                    for i in range(30):
-                        if not self.running:
-                            return
-                        time.sleep(1)
-                    
+                    self._wait_with_check(RETRY_DELAY)
                     continue
                 
-                self._log(f"正在请求非直飞航班数据...")
-                non_direct_response = requests.get(non_direct_url)
+                # 获取非直飞航班价格
+                self._log("正在请求非直飞航班数据...")
                 
-                if non_direct_response.status_code != 200 or non_direct_response.json()["status"] == 2:
-                    self._log("获取非直飞航班数据失败，将在30秒后重试")
+                try:
+                    non_direct_response = requests.get(BASE_URL, params=params_base, timeout=REQUEST_TIMEOUT)
+                    non_direct_response.raise_for_status()
+                    non_direct_data = non_direct_response.json()
+                    
+                    if non_direct_data.get("status") == 2:
+                        raise ValueError(f"API返回错误: {non_direct_data.get('msg', '未知错误')}")
+                    
+                except (requests.exceptions.RequestException, ValueError) as e:
+                    self._log(f"获取非直飞航班数据失败: {e}，将在{RETRY_DELAY}秒后重试")
                     self._update_prices_display("获取非直飞航班数据失败")
-                    
-                    # 等待重试
-                    for i in range(30):
-                        if not self.running:
-                            return
-                        time.sleep(1)
-                    
+                    self._wait_with_check(RETRY_DELAY)
                     continue
                 
                 # 解析响应
-                direct_results = direct_response.json()["data"]["oneWayPrice"][0]
-                non_direct_results = non_direct_response.json()["data"]["oneWayPrice"][0]
+                direct_results = direct_data["data"]["oneWayPrice"][0]
+                non_direct_results = non_direct_data["data"]["oneWayPrice"][0]
                 
                 # 更新价格显示
                 prices_text = ""
@@ -442,23 +502,24 @@ class FlightAlertApp:
                         self.target_prices[date] = direct_price
                         self.no_target_prices[date] = non_direct_price
                     else:
-                        # 检查价格变化
-                        if abs(direct_price - self.target_prices[date]) >= self.config["priceStep"]:
-                            change = direct_price - self.target_prices[date]
-                            change_text = "上涨" if change > 0 else "下降"
-                            self._log(f"{formatted_date} 的直飞价格{change_text} ¥{abs(change)} (从 ¥{self.target_prices[date]} 变为 ¥{direct_price})")
+                        # 检查直飞价格变化
+                        direct_change = direct_price - self.target_prices[date]
+                        if abs(direct_change) >= self.config["priceStep"]:
+                            change_text = "上涨" if direct_change > 0 else "下降"
+                            self._log(f"{formatted_date} 的直飞价格{change_text} ¥{abs(direct_change)} (从 ¥{self.target_prices[date]} 变为 ¥{direct_price})")
                             self._push_message(
-                                f'{formatted_date} 的直飞价格{change_text} ¥{abs(change)}，当前价格: ¥{direct_price}',
+                                f'{formatted_date} 的直飞价格{change_text} ¥{abs(direct_change)}，当前价格: ¥{direct_price}',
                                 self.config["SCKEY"]
                             )
                             self.target_prices[date] = direct_price
                         
-                        if abs(non_direct_price - self.no_target_prices[date]) >= self.config["priceStep"]:
-                            change = non_direct_price - self.no_target_prices[date]
-                            change_text = "上涨" if change > 0 else "下降"
-                            self._log(f"{formatted_date} 的非直飞价格{change_text} ¥{abs(change)} (从 ¥{self.no_target_prices[date]} 变为 ¥{non_direct_price})")
+                        # 检查非直飞价格变化
+                        non_direct_change = non_direct_price - self.no_target_prices[date]
+                        if abs(non_direct_change) >= self.config["priceStep"]:
+                            change_text = "上涨" if non_direct_change > 0 else "下降"
+                            self._log(f"{formatted_date} 的非直飞价格{change_text} ¥{abs(non_direct_change)} (从 ¥{self.no_target_prices[date]} 变为 ¥{non_direct_price})")
                             self._push_message(
-                                f'{formatted_date} 的非直飞价格{change_text} ¥{abs(change)}，当前价格: ¥{non_direct_price}',
+                                f'{formatted_date} 的非直飞价格{change_text} ¥{abs(non_direct_change)}，当前价格: ¥{non_direct_price}',
                                 self.config["SCKEY"]
                             )
                             self.no_target_prices[date] = non_direct_price
@@ -468,37 +529,57 @@ class FlightAlertApp:
                 
                 # 等待下次检查
                 self._update_status(f"下次检查将在 {self.config['sleepTime']} 秒后进行")
-                
-                for i in range(self.config["sleepTime"]):
-                    if not self.running:
-                        return
-                    time.sleep(1)
+                self._wait_with_check(self.config["sleepTime"])
                 
             except Exception as e:
                 self._log(f"监控过程中出错: {str(e)}")
+                logger.exception("监控过程异常")
                 self._update_status(f"错误: {str(e)}")
-                
-                # 等待重试
-                for i in range(30):
-                    if not self.running:
-                        return
-                    time.sleep(1)
+                self._wait_with_check(RETRY_DELAY)
     
-    def _push_message(self, message, token):
+    def _wait_with_check(self, seconds: int) -> None:
+        """等待指定秒数，同时检查运行状态
+        
+        Args:
+            seconds: 等待秒数
+        """
+        for i in range(seconds):
+            if not self.running:
+                return
+            time.sleep(1)
+    
+    def _push_message(self, message: str, token: str) -> bool:
+        """发送推送消息
+        
+        Args:
+            message: 消息内容
+            token: PushPlus token
+            
+        Returns:
+            bool: 是否成功发送
+        """
         if not token:
             self._log("未提供PushPlus令牌，跳过通知")
-            return
+            return False
         
         try:
-            send_url = f'https://www.pushplus.plus/send?token={token}&title=航班价格提醒&content={message}'
-            response = requests.get(send_url)
+            params = {
+                'token': token,
+                'title': '航班价格提醒',
+                'content': message
+            }
+            response = requests.get(PUSHPLUS_URL, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
             
             if response.status_code == 200:
                 self._log(f"通知已发送: {message}")
+                return True
             else:
-                self._log(f"发送通知失败: {response.status_code}")
-        except Exception as e:
+                self._log(f"发送通知失败，状态码: {response.status_code}")
+                return False
+        except requests.exceptions.RequestException as e:
             self._log(f"发送通知出错: {str(e)}")
+            return False
     
     def _log(self, message):
         """添加带时间戳的日志消息"""
@@ -549,8 +630,8 @@ if __name__ == "__main__":
         icon_path = resource_path("icon.ico")
         if os.path.exists(icon_path):
             root.iconbitmap(icon_path)
-    except:
+    except (FileNotFoundError, OSError, tk.TclError):
         pass
-    
+
     app = FlightAlertApp(root)
     root.mainloop()
