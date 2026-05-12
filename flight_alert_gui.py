@@ -8,7 +8,6 @@ import requests
 from datetime import datetime
 import sys
 import logging
-from typing import Dict
 from PIL import Image, ImageTk
 
 # 常量定义
@@ -87,6 +86,71 @@ def get_readable_location(airport_code: str) -> str:
     return AIRPORT_CITY_MAP.get(airport_code, airport_code)
 
 
+def parse_positive_int(value_text: str, field_name: str) -> int:
+    """解析正整数输入，统一数值字段的错误提示。"""
+    try:
+        value = int(value_text)
+    except ValueError:
+        raise ValueError(f"{field_name}必须是有效的正整数")
+
+    if value <= 0:
+        raise ValueError(f"{field_name}必须是有效的正整数")
+
+    return value
+
+
+def parse_monitor_config(
+        dates_text: str, place_from_text: str, place_to_text: str,
+        flight_way_text: str, sleep_time_text: str, price_step_text: str,
+        sckey_text: str) -> dict:
+    """从GUI输入构建并验证监控配置。
+
+    保存配置和开始监控共用此函数，确保两条路径给出一致的校验结果。
+    """
+    dates = [date.strip() for date in dates_text.split(",") if date.strip()]
+    if not dates:
+        raise ValueError("请至少输入一个日期")
+
+    place_from = place_from_text.strip().upper()
+    place_to = place_to_text.strip().upper()
+
+    if not place_from:
+        raise ValueError("请输入出发机场代码")
+    if not place_to:
+        raise ValueError("请输入到达机场代码")
+
+    if len(place_from) != 3 or not place_from.isalpha():
+        raise ValueError(f"出发机场代码格式错误: {place_from}，应为3个字母的IATA代码")
+    if len(place_to) != 3 or not place_to.isalpha():
+        raise ValueError(f"到达机场代码格式错误: {place_to}，应为3个字母的IATA代码")
+
+    for date in dates:
+        if len(date) != 8 or not date.isdigit():
+            raise ValueError(f"日期格式错误: {date}，应为8位数字 (YYYYMMDD)")
+        try:
+            datetime.strptime(date, '%Y%m%d')
+        except ValueError:
+            raise ValueError(f"无效日期: {date}")
+
+    sleep_time = parse_positive_int(sleep_time_text, "检查间隔")
+    price_step = parse_positive_int(price_step_text, "价格变动阈值")
+
+    flight_way_key = flight_way_text.strip().lower()
+    flight_way_values = {"oneway": "Oneway", "roundtrip": "Roundtrip"}
+    if flight_way_key not in flight_way_values:
+        raise ValueError("航程类型必须是 Oneway 或 Roundtrip")
+
+    return {
+        "dateToGo": dates,
+        "placeFrom": place_from,
+        "placeTo": place_to,
+        "flightWay": flight_way_values[flight_way_key],
+        "sleepTime": sleep_time,
+        "priceStep": price_step,
+        "SCKEY": sckey_text.strip()
+    }
+
+
 class FlightAlertApp:
     def __init__(self, root):
         self.root = root
@@ -99,6 +163,7 @@ class FlightAlertApp:
         self.accent_color = "#1E90FF"  # 蓝色
         self.text_color = "#333333"
         self.highlight_color = "#FFD700"  # 金色
+        self.font_family = self._select_font_family()
         
         # 确保配置目录存在
         self.config_dir = self._get_config_dir()
@@ -121,6 +186,8 @@ class FlightAlertApp:
         self.monitor_thread = None
         self.target_prices = {}
         self.no_target_prices = {}
+        self.config = None
+        self.last_check_time = None
         
         # 创建UI
         self._create_ui()
@@ -139,51 +206,80 @@ class FlightAlertApp:
         # 在其他系统或备选方案：使用当前可执行文件所在目录
         return os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
     
+    def _select_font_family(self):
+        """按平台选择更稳妥的中文字体名称。"""
+        if sys.platform.startswith('win'):
+            return "微软雅黑"
+        if sys.platform == 'darwin':
+            return "PingFang SC"
+        return "Noto Sans CJK SC"
+
+    def _font(self, size: int, weight: str = None):
+        """返回Tkinter字体元组，集中控制字体和字号。"""
+        if weight:
+            return (self.font_family, size, weight)
+        return (self.font_family, size)
+
     def _setup_styles(self):
         """设置自定义样式"""
         style = ttk.Style()
         style.theme_use('clam')
-        
+
         # 配置主题色
         style.configure("TFrame", background=self.bg_color)
-        style.configure("TLabel", background=self.bg_color, foreground=self.text_color, font=("微软雅黑", 10))
-        style.configure("TButton", background=self.accent_color, foreground="white", font=("微软雅黑", 10))
-        style.map("TButton", 
-                 background=[("active", self.highlight_color), ("disabled", "#cccccc")],
-                 foreground=[("active", self.text_color), ("disabled", "#666666")])
-        
+        style.configure("TLabel", background=self.bg_color, foreground=self.text_color, font=self._font(10))
+        style.configure("TButton", background=self.accent_color, foreground="white", font=self._font(10))
+        style.map(
+            "TButton",
+            background=[("active", self.highlight_color), ("disabled", "#cccccc")],
+            foreground=[("active", self.text_color), ("disabled", "#666666")]
+        )
+
         # 标题样式
-        style.configure("Title.TLabel", font=("微软雅黑", 16, "bold"), foreground=self.accent_color)
-        
+        style.configure("Title.TLabel", font=self._font(16, "bold"), foreground=self.accent_color)
+
         # 子标题样式
-        style.configure("Subtitle.TLabel", font=("微软雅黑", 12), foreground=self.text_color)
-        
+        style.configure("Subtitle.TLabel", font=self._font(12), foreground=self.text_color)
+
         # 标签框样式
         style.configure("TLabelframe", background=self.bg_color)
-        style.configure("TLabelframe.Label", background=self.bg_color, foreground=self.accent_color, font=("微软雅黑", 11, "bold"))
-        
+        style.configure(
+            "TLabelframe.Label",
+            background=self.bg_color,
+            foreground=self.accent_color,
+            font=self._font(11, "bold")
+        )
+
         # 笔记本样式
         style.configure("TNotebook", background=self.bg_color, tabposition='n')
-        style.configure("TNotebook.Tab", background="#e0e0e0", foreground=self.text_color, padding=[10, 5], font=("微软雅黑", 10))
-        style.map("TNotebook.Tab", 
-                 background=[("selected", self.accent_color)],
-                 foreground=[("selected", "white")])
-        
+        style.configure(
+            "TNotebook.Tab",
+            background="#e0e0e0",
+            foreground=self.text_color,
+            padding=[10, 5],
+            font=self._font(10)
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", self.accent_color)],
+            foreground=[("selected", "white")]
+        )
+
         # 输入框样式
-        style.configure("TEntry", fieldbackground="white", foreground=self.text_color, font=("微软雅黑", 10))
-        
+        style.configure("TEntry", fieldbackground="white", foreground=self.text_color, font=self._font(10))
+
         # 按钮样式
-        style.configure("Primary.TButton", font=("微软雅黑", 10, "bold"))
+        style.configure("Primary.TButton", font=self._font(10, "bold"))
         style.configure("Secondary.TButton", background="#f0f0f0", foreground=self.text_color)
-        
+
         # 开始按钮
-        style.configure("Start.TButton", background="#4CAF50", foreground="white", font=("微软雅黑", 10, "bold"))
+        style.configure("Start.TButton", background="#4CAF50", foreground="white", font=self._font(10, "bold"))
         style.map("Start.TButton", background=[("active", "#66BB6A"), ("disabled", "#A5D6A7")])
-        
+
         # 停止按钮
-        style.configure("Stop.TButton", background="#F44336", foreground="white", font=("微软雅黑", 10, "bold"))
+        style.configure("Stop.TButton", background="#F44336", foreground="white", font=self._font(10, "bold"))
         style.map("Stop.TButton", background=[("active", "#EF5350"), ("disabled", "#FFCDD2")])
-    
+
     def _create_ui(self):
         # 创建带标签的笔记本
         notebook = ttk.Notebook(self.root)
@@ -207,7 +303,7 @@ class FlightAlertApp:
         # 标题
         header_frame = ttk.Frame(parent)
         header_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
-        
+
         # 如果有图标，添加图标
         try:
             icon_path = resource_path("icon.png")
@@ -222,178 +318,199 @@ class FlightAlertApp:
                 icon_label.pack(side=tk.LEFT, padx=(0, 10))
         except (FileNotFoundError, OSError):
             pass
-        
+
         ttk.Label(header_frame, text="航班价格监控配置", style="Title.TLabel").pack(side=tk.LEFT)
-        
+
         # 分隔线
         separator = ttk.Separator(parent, orient='horizontal')
         separator.pack(fill=tk.X, padx=20, pady=10)
-        
+
         # 创建表单
         form_frame = ttk.Frame(parent)
         form_frame.pack(fill=tk.BOTH, padx=30, pady=10)
-        
+
         # 创建两列布局
         form_frame.columnconfigure(0, weight=2)
         form_frame.columnconfigure(1, weight=3)
-        
+
         # 日期
         ttk.Label(form_frame, text="监控日期 (格式YYYYMMDD，用逗号分隔):", style="Subtitle.TLabel").grid(row=0, column=0, sticky=tk.W, pady=(10, 5))
         date_entry = ttk.Entry(form_frame, textvariable=self.dates_var, width=50)
-        date_entry.grid(row=0, column=1, sticky=tk.W, pady=(10, 5))
-        
+        date_entry.grid(row=0, column=1, sticky=tk.EW, pady=(10, 5))
+
         # 出发地
         ttk.Label(form_frame, text="出发机场代码:", style="Subtitle.TLabel").grid(row=1, column=0, sticky=tk.W, pady=10)
         ttk.Entry(form_frame, textvariable=self.place_from_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=10)
-        
+
         # 目的地
         ttk.Label(form_frame, text="到达机场代码:", style="Subtitle.TLabel").grid(row=2, column=0, sticky=tk.W, pady=10)
         ttk.Entry(form_frame, textvariable=self.place_to_var, width=10).grid(row=2, column=1, sticky=tk.W, pady=10)
-        
+
         # 航程类型
         ttk.Label(form_frame, text="航程类型:", style="Subtitle.TLabel").grid(row=3, column=0, sticky=tk.W, pady=10)
         flight_way_combo = ttk.Combobox(form_frame, textvariable=self.flight_way_var, values=["Oneway", "Roundtrip"], width=12, state="readonly")
         flight_way_combo.grid(row=3, column=1, sticky=tk.W, pady=10)
         flight_way_combo.current(0)
-        
+
         # 刷新间隔
         ttk.Label(form_frame, text="检查间隔 (秒):", style="Subtitle.TLabel").grid(row=4, column=0, sticky=tk.W, pady=10)
         ttk.Entry(form_frame, textvariable=self.sleep_time_var, width=10).grid(row=4, column=1, sticky=tk.W, pady=10)
-        
+
         # 价格变动阈值
         ttk.Label(form_frame, text="价格变动阈值 (元):", style="Subtitle.TLabel").grid(row=5, column=0, sticky=tk.W, pady=10)
         ttk.Entry(form_frame, textvariable=self.price_step_var, width=10).grid(row=5, column=1, sticky=tk.W, pady=10)
-        
+
         # PushPlus推送令牌
-        ttk.Label(form_frame, text="PushPlus推送令牌:", style="Subtitle.TLabel").grid(row=6, column=0, sticky=tk.W, pady=10)
-        ttk.Entry(form_frame, textvariable=self.sckey_var, width=50).grid(row=6, column=1, sticky=tk.W, pady=10)
-        
+        ttk.Label(form_frame, text="PushPlus 推送令牌:", style="Subtitle.TLabel").grid(row=6, column=0, sticky=tk.W, pady=10)
+        ttk.Entry(form_frame, textvariable=self.sckey_var, width=50, show="*").grid(row=6, column=1, sticky=tk.EW, pady=10)
+
         # 提示文本
         tip_frame = ttk.Frame(parent)
         tip_frame.pack(fill=tk.X, padx=30, pady=5)
-        tip_text = "提示: PushPlus推送令牌用于发送价格变动通知到您的微信，可在 pushplus.plus 网站获取"
-        ttk.Label(tip_frame, text=tip_text, foreground="#666666", font=("微软雅黑", 9)).pack(anchor=tk.W)
-        
+        tips = [
+            "示例: 日期 20251105,20251106；路线 KMG → TNA。",
+            "PushPlus 推送令牌用于发送价格变动通知到微信；留空时仍可监控价格，但不会发送通知。",
+            "令牌输入框仅做屏幕遮蔽，不代表本地配置文件已加密。"
+        ]
+        for tip_text in tips:
+            ttk.Label(
+                tip_frame,
+                text=tip_text,
+                foreground="#666666",
+                font=self._font(9),
+                wraplength=780
+            ).pack(anchor=tk.W)
+
         # 配置保存位置提示
         config_path_frame = ttk.Frame(parent)
         config_path_frame.pack(fill=tk.X, padx=30, pady=5)
         config_path_text = f"配置文件保存位置: {self.config_dir}"
-        ttk.Label(config_path_frame, text=config_path_text, foreground="#666666", font=("微软雅黑", 9)).pack(anchor=tk.W)
-        
+        ttk.Label(config_path_frame, text=config_path_text, foreground="#666666", font=self._font(9)).pack(anchor=tk.W)
+
         # 按钮
         buttons_frame = ttk.Frame(parent)
         buttons_frame.pack(fill=tk.X, padx=30, pady=20)
-        
+
         ttk.Button(buttons_frame, text="保存配置", style="Primary.TButton", command=self._save_config).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons_frame, text="加载配置", style="Secondary.TButton", command=self._load_config).pack(side=tk.LEFT, padx=5)
-    
+
     def _create_monitor_ui(self, parent):
         # 控制按钮框架
         controls_frame = ttk.Frame(parent)
         controls_frame.pack(fill=tk.X, padx=20, pady=20)
-        
+
         # 标题
         ttk.Label(controls_frame, text="航班价格监控", style="Title.TLabel").pack(side=tk.LEFT)
-        
+
         # 按钮放在右边
         buttons_frame = ttk.Frame(controls_frame)
         buttons_frame.pack(side=tk.RIGHT)
-        
+
         self.start_button = ttk.Button(buttons_frame, text="开始监控", style="Start.TButton", command=self._start_monitoring, width=12)
         self.start_button.pack(side=tk.LEFT, padx=5)
-        
+
         self.stop_button = ttk.Button(buttons_frame, text="停止监控", style="Stop.TButton", command=self._stop_monitoring, width=12, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
-        
+
         # 状态框架
         status_frame = ttk.LabelFrame(parent, text="当前状态")
         status_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        self.status_label = ttk.Label(status_frame, text="准备就绪，等待开始监控", font=("微软雅黑", 10))
-        self.status_label.pack(padx=15, pady=10, anchor=tk.W)
-        
+
+        self.status_label = ttk.Label(
+            status_frame,
+            text=self._status_text("准备就绪，等待开始监控"),
+            font=self._font(10),
+            justify=tk.LEFT,
+            wraplength=820
+        )
+        self.status_label.pack(fill=tk.X, padx=15, pady=10, anchor=tk.W)
+
         # 价格框架
         prices_frame = ttk.LabelFrame(parent, text="当前价格")
         prices_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        self.prices_text = scrolledtext.ScrolledText(prices_frame, height=6, wrap=tk.WORD, font=("微软雅黑", 10))
+
+        self.prices_text = scrolledtext.ScrolledText(prices_frame, height=6, wrap=tk.WORD, font=self._font(10))
         self.prices_text.pack(fill=tk.X, padx=10, pady=10)
         self.prices_text.config(state=tk.DISABLED)
-        
+        self._set_prices_text(self._empty_prices_text())
+
         # 日志框架
         log_frame = ttk.LabelFrame(parent, text="活动日志")
         log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, font=("微软雅黑", 10))
+
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, font=self._font(10))
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.log_text.config(state=tk.DISABLED)
-        
+
         # 添加欢迎信息
         self._log("欢迎使用航班价格监控系统！")
         self._log("请在配置页面设置监控参数，然后点击开始监控按钮")
-    
+
+    def _build_config_from_inputs(self) -> dict:
+        """读取GUI输入并构建已验证、已规范化的配置。"""
+        return parse_monitor_config(
+            self.dates_var.get(),
+            self.place_from_var.get(),
+            self.place_to_var.get(),
+            self.flight_way_var.get(),
+            self.sleep_time_var.get(),
+            self.price_step_var.get(),
+            self.sckey_var.get()
+        )
+
+    def _format_dates(self, dates) -> str:
+        return ", ".join(dates) if dates else "未配置"
+
+    def _format_route(self, config: dict) -> str:
+        place_from = config.get("placeFrom", "")
+        place_to = config.get("placeTo", "")
+        from_display = get_readable_location(place_from)
+        to_display = get_readable_location(place_to)
+        return f"{from_display}({place_from}) → {to_display}({place_to})"
+
+    def _notification_state(self, config: dict) -> str:
+        if config.get("SCKEY"):
+            return "已启用 PushPlus 通知"
+        return "未填写 PushPlus 令牌，仅监控价格，不发送通知"
+
+    def _status_text(self, phase: str, detail: str = "", config: dict = None) -> str:
+        """生成监控状态摘要，避免用户只能从日志判断当前状态。"""
+        active_config = config or self.config
+        lines = [f"状态: {phase}"]
+        if active_config:
+            lines.append(f"路线: {self._format_route(active_config)}")
+            lines.append(f"监控日期: {self._format_dates(active_config.get('dateToGo', []))}")
+            lines.append(f"通知: {self._notification_state(active_config)}")
+        else:
+            lines.append("路线/日期: 未开始监控")
+        if self.last_check_time:
+            lines.append(f"上次检查: {self.last_check_time}")
+        if detail:
+            lines.append(detail)
+        return "\n".join(lines)
+
+    def _empty_prices_text(self) -> str:
+        return "尚未获取价格。\n请先在“配置设置”页填写参数，然后点击“开始监控”。"
+
+    def _price_header_text(self, config: dict) -> str:
+        return "\n".join([
+            f"路线: {self._format_route(config)}",
+            f"监控日期: {self._format_dates(config.get('dateToGo', []))}",
+            f"通知: {self._notification_state(config)}"
+        ])
+
     def _save_config(self):
         """保存配置到文件"""
         try:
-            # 解析并验证日期
-            dates = [date.strip()
-                     for date in self.dates_var.get().split(",") if date.strip()]
+            config = self._build_config_from_inputs()
 
-            # 验证配置
-            if not dates:
-                raise ValueError("请至少输入一个日期")
-
-            place_from = self.place_from_var.get().strip().upper()
-            place_to = self.place_to_var.get().strip().upper()
-
-            if not place_from:
-                raise ValueError("请输入出发机场代码")
-            if not place_to:
-                raise ValueError("请输入到达机场代码")
-
-            # 验证机场代码格式（应为3个字母）
-            if len(place_from) != 3 or not place_from.isalpha():
-                raise ValueError(
-                    f"出发机场代码格式错误: {place_from}，应为3个字母的IATA代码")
-            if len(place_to) != 3 or not place_to.isalpha():
-                raise ValueError(
-                    f"到达机场代码格式错误: {place_to}，应为3个字母的IATA代码")
-
-            # 验证日期格式和有效性
-            for date in dates:
-                if len(date) != 8 or not date.isdigit():
-                    raise ValueError(
-                        f"日期格式错误: {date}，应为8位数字 (YYYYMMDD)")
-                # 验证日期是否有效
-                try:
-                    datetime.strptime(date, '%Y%m%d')
-                except ValueError:
-                    raise ValueError(f"无效日期: {date}")
-
-            # 验证数值
-            try:
-                sleep_time = int(self.sleep_time_var.get())
-                if sleep_time <= 0:
-                    raise ValueError("检查间隔必须大于0")
-            except ValueError:
-                raise ValueError("检查间隔必须是有效的正整数")
-
-            try:
-                price_step = int(self.price_step_var.get())
-                if price_step <= 0:
-                    raise ValueError("价格变动阈值必须大于0")
-            except ValueError:
-                raise ValueError("价格变动阈值必须是有效的正整数")
-
-            config = {
-                "dateToGo": dates,
-                "placeFrom": place_from,
-                "placeTo": place_to,
-                "flightWay": self.flight_way_var.get(),
-                "sleepTime": sleep_time,
-                "priceStep": price_step,
-                "SCKEY": self.sckey_var.get().strip()
-            }
+            # 将规范化后的值回填到界面，保存和开始监控保持同一套表现。
+            self.dates_var.set(",".join(config["dateToGo"]))
+            self.place_from_var.set(config["placeFrom"])
+            self.place_to_var.set(config["placeTo"])
+            self.flight_way_var.set(config["flightWay"])
+            self.sleep_time_var.set(str(config["sleepTime"]))
+            self.price_step_var.set(str(config["priceStep"]))
 
             # 获取配置路径
             config_path = os.path.join(self.config_dir, 'config.json')
@@ -403,6 +520,8 @@ class FlightAlertApp:
                 json.dump(config, f, indent=4, ensure_ascii=False)
 
             self._log(f"配置保存成功: {config_path}")
+            if not config["SCKEY"]:
+                self._log("未填写 PushPlus 推送令牌；后续监控只记录价格，不发送通知")
             messagebox.showinfo("成功", "配置保存成功")
         except ValueError as e:
             self._log(f"配置验证失败: {str(e)}")
@@ -410,7 +529,7 @@ class FlightAlertApp:
         except Exception as e:
             self._log(f"保存配置出错: {str(e)}")
             messagebox.showerror("错误", f"保存配置失败: {str(e)}")
-    
+
     def _load_config(self):
         try:
             config_path = os.path.join(self.config_dir, 'config.json')
@@ -438,75 +557,64 @@ class FlightAlertApp:
     def _start_monitoring(self):
         if self.running:
             return
-        
+
         try:
-            # 验证配置
-            dates = [date.strip() for date in self.dates_var.get().split(",")]
-            place_from = self.place_from_var.get()
-            place_to = self.place_to_var.get()
-            flight_way = self.flight_way_var.get()
-            sleep_time = int(self.sleep_time_var.get())
-            price_step = int(self.price_step_var.get())
-            sckey = self.sckey_var.get()
-            
-            if not dates or "" in dates:
-                raise ValueError("请至少输入一个日期")
-            if not place_from:
-                raise ValueError("请输入出发机场代码")
-            if not place_to:
-                raise ValueError("请输入到达机场代码")
-            
-            # 创建配置
-            self.config = {
-                "dateToGo": dates,
-                "placeFrom": place_from,
-                "placeTo": place_to,
-                "flightWay": flight_way,
-                "sleepTime": sleep_time,
-                "priceStep": price_step,
-                "SCKEY": sckey
-            }
-            
+            self.config = self._build_config_from_inputs()
+
+            # 将规范化后的值回填到界面，避免保存和开始监控表现不一致。
+            self.dates_var.set(",".join(self.config["dateToGo"]))
+            self.place_from_var.set(self.config["placeFrom"])
+            self.place_to_var.set(self.config["placeTo"])
+            self.flight_way_var.set(self.config["flightWay"])
+            self.sleep_time_var.set(str(self.config["sleepTime"]))
+            self.price_step_var.set(str(self.config["priceStep"]))
+
             # 初始化目标价格
             self.target_prices = {date: 0 for date in self.config["dateToGo"]}
             self.no_target_prices = {date: 0 for date in self.config["dateToGo"]}
-            
+            self.last_check_time = None
+
             # 更新UI
             self.running = True
             self.start_button.config(state=tk.DISABLED)
             self.stop_button.config(state=tk.NORMAL)
-            self.status_label.config(text="价格监控进行中...")
+            self._update_status(self._status_text("价格监控进行中，准备检查"))
+            self._update_prices_display(
+                f"正在准备获取价格...\n{self._price_header_text(self.config)}"
+            )
 
             # 开始监控线程
             self.monitor_thread = threading.Thread(target=self._monitor_prices)
             self.monitor_thread.daemon = True
             self.monitor_thread.start()
 
-            # 显示监控路线，使用可读的城市名称
-            from_display = get_readable_location(place_from)
-            to_display = get_readable_location(place_to)
-            self._log(f"价格监控已启动 - 路线: {from_display}({place_from}) → {to_display}({place_to})")
+            self._log(f"价格监控已启动 - 路线: {self._format_route(self.config)}")
+            if not self.config["SCKEY"]:
+                self._log("未填写 PushPlus 推送令牌；本次监控不会发送微信通知")
+        except ValueError as e:
+            self._log(f"启动监控验证失败: {str(e)}")
+            messagebox.showerror("错误", str(e))
         except Exception as e:
             self._log(f"启动监控出错: {str(e)}")
             messagebox.showerror("错误", f"启动监控失败: {str(e)}")
-    
+
     def _stop_monitoring(self):
         if not self.running:
             return
-        
+
         self.running = False
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
-        self.status_label.config(text="监控已停止")
+        self._update_status(self._status_text("监控已停止"))
         self._log("价格监控已停止")
-    
+
     def _monitor_prices(self):
         """监控价格主循环"""
         while self.running:
             try:
-                # 更新状态
-                self._update_status(f"正在检查价格 ({datetime.now().strftime('%H:%M:%S')})")
-                
+                check_started = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self._update_status(self._status_text("正在检查直飞价格", f"本轮开始: {check_started}"))
+
                 # 构建请求参数
                 params_base = {
                     'flightWay': self.config["flightWay"],
@@ -514,65 +622,73 @@ class FlightAlertApp:
                     'acity': self.config["placeTo"],
                     'army': 'false'
                 }
-                
+
                 # 获取直飞航班价格
                 self._log("正在请求直飞航班数据...")
                 params_direct = {**params_base, 'direct': 'true'}
-                
+
                 try:
                     direct_response = requests.get(BASE_URL, params=params_direct, timeout=REQUEST_TIMEOUT)
                     direct_response.raise_for_status()
                     direct_data = direct_response.json()
-                    
+
                     if direct_data.get("status") == 2:
                         raise ValueError(f"API返回错误: {direct_data.get('msg', '未知错误')}")
-                    
+
                 except (requests.exceptions.RequestException, ValueError) as e:
-                    self._log(f"获取直飞航班数据失败: {e}，将在{RETRY_DELAY}秒后重试")
-                    self._update_prices_display("获取直飞航班数据失败")
-                    self._wait_with_check(RETRY_DELAY)
+                    message = f"获取直飞航班数据失败: {e}"
+                    self._log(f"{message}，将在{RETRY_DELAY}秒后重试")
+                    self._update_status(self._status_text("请求失败，等待重试", f"{message}；重试将在 {RETRY_DELAY} 秒后进行"))
+                    self._update_prices_display(f"{message}\n将在 {RETRY_DELAY} 秒后重试。")
+                    self._wait_with_check(RETRY_DELAY, phase="请求失败，等待重试", action_label="重试")
                     continue
-                
+
                 # 获取非直飞航班价格
+                self._update_status(self._status_text("正在检查非直飞价格", f"本轮开始: {check_started}"))
                 self._log("正在请求非直飞航班数据...")
-                
+
                 try:
                     non_direct_response = requests.get(BASE_URL, params=params_base, timeout=REQUEST_TIMEOUT)
                     non_direct_response.raise_for_status()
                     non_direct_data = non_direct_response.json()
-                    
+
                     if non_direct_data.get("status") == 2:
                         raise ValueError(f"API返回错误: {non_direct_data.get('msg', '未知错误')}")
-                    
+
                 except (requests.exceptions.RequestException, ValueError) as e:
-                    self._log(f"获取非直飞航班数据失败: {e}，将在{RETRY_DELAY}秒后重试")
-                    self._update_prices_display("获取非直飞航班数据失败")
-                    self._wait_with_check(RETRY_DELAY)
+                    message = f"获取非直飞航班数据失败: {e}"
+                    self._log(f"{message}，将在{RETRY_DELAY}秒后重试")
+                    self._update_status(self._status_text("请求失败，等待重试", f"{message}；重试将在 {RETRY_DELAY} 秒后进行"))
+                    self._update_prices_display(f"{message}\n将在 {RETRY_DELAY} 秒后重试。")
+                    self._wait_with_check(RETRY_DELAY, phase="请求失败，等待重试", action_label="重试")
                     continue
-                
+
                 # 解析响应
                 direct_results = direct_data["data"]["oneWayPrice"][0]
                 non_direct_results = non_direct_data["data"]["oneWayPrice"][0]
-                
+
                 # 更新价格显示
-                prices_text = ""
-                
+                prices_lines = [self._price_header_text(self.config), ""]
+
                 for date in self.config["dateToGo"]:
                     if date not in direct_results or date not in non_direct_results:
                         self._log(f"未找到日期 {date} 的数据")
-                        prices_text += f"日期 {date}: 暂无数据\n"
+                        prices_lines.append(f"日期 {date}: 暂无数据")
                         continue
-                    
+
                     direct_price = direct_results[date]
                     non_direct_price = non_direct_results[date]
-                    
+
                     formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
-                    prices_text += f"日期 {formatted_date}: 直飞 ¥{direct_price}, 非直飞 ¥{non_direct_price}\n"
+                    prices_lines.append(f"日期 {formatted_date}: 直飞 ¥{direct_price}, 非直飞 ¥{non_direct_price}")
                     self._log(f"日期 {formatted_date}: 直飞 ¥{direct_price}, 非直飞 ¥{non_direct_price}")
-                    
+
                     if self.target_prices[date] == 0:
                         # 首次获取价格
-                        self._log(f"首次获取 {formatted_date} 的价格，正在发送通知")
+                        if self.config["SCKEY"]:
+                            self._log(f"首次获取 {formatted_date} 的价格，正在发送通知")
+                        else:
+                            self._log(f"首次获取 {formatted_date} 的价格；未填写PushPlus令牌，仅记录价格")
                         self._push_message(
                             f'首次提醒: {formatted_date} 的直飞价格 ¥{direct_price}, 非直飞价格 ¥{non_direct_price}',
                             self.config["SCKEY"]
@@ -590,7 +706,7 @@ class FlightAlertApp:
                                 self.config["SCKEY"]
                             )
                             self.target_prices[date] = direct_price
-                        
+
                         # 检查非直飞价格变化
                         non_direct_change = non_direct_price - self.no_target_prices[date]
                         if abs(non_direct_change) >= self.config["priceStep"]:
@@ -601,33 +717,39 @@ class FlightAlertApp:
                                 self.config["SCKEY"]
                             )
                             self.no_target_prices[date] = non_direct_price
-                
+
+                self.last_check_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
                 # 更新价格显示
-                self._update_prices_display(prices_text)
-                
+                self._update_prices_display("\n".join(prices_lines))
+
                 # 等待下次检查
-                self._update_status(f"下次检查将在 {self.config['sleepTime']} 秒后进行")
-                self._wait_with_check(self.config["sleepTime"])
-                
+                self._update_status(self._status_text("本轮查询完成", f"下次检查将在 {self.config['sleepTime']} 秒后进行"))
+                self._wait_with_check(self.config["sleepTime"], phase="等待下次检查", action_label="下次检查")
+
             except Exception as e:
-                self._log(f"监控过程中出错: {str(e)}")
+                message = f"监控过程中出错: {str(e)}"
+                self._log(message)
                 logger.exception("监控过程异常")
-                self._update_status(f"错误: {str(e)}")
-                self._wait_with_check(RETRY_DELAY)
-    
-    def _wait_with_check(self, seconds: int) -> None:
+                self._update_status(self._status_text("监控出错，等待重试", f"{message}；重试将在 {RETRY_DELAY} 秒后进行"))
+                self._update_prices_display(f"{message}\n将在 {RETRY_DELAY} 秒后重试。")
+                self._wait_with_check(RETRY_DELAY, phase="监控出错，等待重试", action_label="重试")
+
+    def _wait_with_check(self, seconds: int, phase: str = "等待下次检查", action_label: str = "下次检查") -> None:
         """等待指定秒数，同时检查运行状态并显示倒计时
 
         Args:
             seconds: 等待秒数
+            phase: 状态摘要中的当前阶段
+            action_label: 倒计时动作名称，如“下次检查”或“重试”
         """
         for i in range(seconds):
             if not self.running:
                 return
             remaining = seconds - i
-            self._update_status(f"下次检查将在 {remaining} 秒后进行")
+            self._update_status(self._status_text(phase, f"{action_label}将在 {remaining} 秒后进行"))
             time.sleep(1)
-    
+
     def _push_message(self, message: str, token: str) -> bool:
         """发送推送消息
         
