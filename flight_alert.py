@@ -108,7 +108,7 @@ def get_readable_location(airport_code: str) -> str:
     return AIRPORT_CITY_MAP.get(airport_code, airport_code)
 
 
-def push_message(message: str, token: str) -> bool:
+def push_message(message: str, token: str, title: str = "航班价格提醒") -> bool:
     """发送推送消息到微信
 
     使用 pushplus 官方文档（https://www.pushplus.plus/doc/guide/api.html）推荐的
@@ -118,6 +118,7 @@ def push_message(message: str, token: str) -> bool:
     Args:
         message: 消息内容
         token: PushPlus token
+        title: 消息标题（默认 "航班价格提醒"）
 
     Returns:
         bool: 发送是否成功
@@ -128,7 +129,7 @@ def push_message(message: str, token: str) -> bool:
 
     payload = {
         "token": token,
-        "title": "航班价格提醒",
+        "title": title,
         "content": message,
         # pushplus 的 markdown 模板里单 \n 是软换行（不换行），要真正换行得用
         # html 模板。文档明确："不支持html格式，换行使用\n表示" 适用于 markdown
@@ -332,12 +333,19 @@ def process_price_changes(
     实际推送由调用方在收集完所有日期的 ``lines`` 后，统一调用一次
     ``push_message`` 完成。这样多日期可以合并为一条推送。
 
+    返回的每行格式统一为：
+        ``YYYY-MM-DD: 直飞: ¥<price>, 中转: ¥<price>``
+
+    是否需要产生通知行的判断：
+    - 首次（``target_prices[date] == 0``）总是产生一行
+    - 后续只在直飞或中转任意一项的变化幅度 ≥ ``priceStep`` 时产生一行
+
     Args:
         date: 日期
         direct_price: 直飞价格
-        non_direct_price: 非直飞价格
+        non_direct_price: 中转价格
         target_prices: 直飞目标价格字典
-        no_target_prices: 非直飞目标价格字典
+        no_target_prices: 中转目标价格字典
         config: 配置信息
 
     Returns:
@@ -345,44 +353,43 @@ def process_price_changes(
     """
     formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
     logger.info(
-        f'{formatted_date} - 直飞: ¥{direct_price}, 非直飞: ¥{non_direct_price}')
+        f'{formatted_date} - 直飞: ¥{direct_price}, 中转: ¥{non_direct_price}')
+
+    is_first_time = target_prices[date] == 0
+    if is_first_time:
+        direct_change = 0
+        non_direct_change = 0
+    else:
+        direct_change = direct_price - target_prices[date]
+        non_direct_change = non_direct_price - no_target_prices[date]
+
+    direct_crossed = is_first_time or abs(direct_change) >= config["priceStep"]
+    non_direct_crossed = is_first_time or abs(non_direct_change) >= config["priceStep"]
 
     lines: List[str] = []
-    if target_prices[date] == 0:
-        # 第一次获取价格
-        logger.info(f'首次获取 {formatted_date} 的票价')
-        lines.append(
-            f'首次提醒: {formatted_date} 的直飞价格 ¥{direct_price}, '
-            f'非直飞价格 ¥{non_direct_price}'
-        )
-        target_prices[date] = direct_price
-        no_target_prices[date] = non_direct_price
-    else:
-        # 检查直飞价格变化
-        direct_change = direct_price - target_prices[date]
-        if abs(direct_change) >= config["priceStep"]:
-            change_text = "上涨" if direct_change > 0 else "下降"
-            logger.info(
-                f'{formatted_date} 直飞价格{change_text} ¥{abs(direct_change)} '
-                f'(¥{target_prices[date]} → ¥{direct_price})')
-            lines.append(
-                f'{formatted_date} 直飞价格{change_text} ¥{abs(direct_change)}, '
-                f'当前价格: ¥{direct_price}'
-            )
-            target_prices[date] = direct_price
+    if direct_crossed or non_direct_crossed:
+        if is_first_time:
+            logger.info(f'首次获取 {formatted_date} 的票价')
+        else:
+            if abs(direct_change) >= config["priceStep"]:
+                change_text = "上涨" if direct_change > 0 else "下降"
+                logger.info(
+                    f'{formatted_date} 直飞{change_text} ¥{abs(direct_change)} '
+                    f'(¥{target_prices[date]} → ¥{direct_price})')
+            if abs(non_direct_change) >= config["priceStep"]:
+                change_text = "上涨" if non_direct_change > 0 else "下降"
+                logger.info(
+                    f'{formatted_date} 中转{change_text} ¥{abs(non_direct_change)} '
+                    f'(¥{no_target_prices[date]} → ¥{non_direct_price})')
 
-        # 检查非直飞价格变化
-        non_direct_change = non_direct_price - no_target_prices[date]
-        if abs(non_direct_change) >= config["priceStep"]:
-            change_text = "上涨" if non_direct_change > 0 else "下降"
-            logger.info(
-                f'{formatted_date} 非直飞价格{change_text} ¥{abs(non_direct_change)} '
-                f'(¥{no_target_prices[date]} → ¥{non_direct_price})')
-            lines.append(
-                f'{formatted_date} 非直飞价格{change_text} ¥{abs(non_direct_change)}, '
-                f'当前价格: ¥{non_direct_price}'
-            )
-            no_target_prices[date] = non_direct_price
+        lines.append(
+            f'{formatted_date}: 直飞: ¥{direct_price}, 中转: ¥{non_direct_price}'
+        )
+
+    if direct_crossed:
+        target_prices[date] = direct_price
+    if non_direct_crossed:
+        no_target_prices[date] = non_direct_price
 
     return lines
 
@@ -451,6 +458,7 @@ if __name__ == "__main__":
                     push_message(
                         "\n".join(pending_lines),
                         config.get("SCKEY", ""),
+                        title=f"{from_display} → {to_display} 航班价格提醒",
                     )
 
                 # 等待下次查询

@@ -22,10 +22,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pillow requests
+          pip install pyinstaller requests
 
       - name: Build executable
-        run: pyinstaller --onefile --windowed --name FlightAlert flight_alert_gui.py
+        run: pyinstaller --onefile --name FlightAlert flight_alert.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
