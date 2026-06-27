@@ -8,7 +8,7 @@
     "placeFrom": "KMG",
     "placeTo": "TNA",
     "flightWay": "Oneway",
-    "sleepTime": 600,
+    "sleepTime": 3600,
     "priceStep": 50,
     "SCKEY": "",
     "cookie": ""

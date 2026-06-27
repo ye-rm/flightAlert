@@ -5,6 +5,17 @@
 
 > **注意**：本工具仅供个人学习和研究使用，禁止用于商业用途。
 
+## 本项目对原版做出的调整
+
+本项目 fork 自 [davidwushi1145/flightAlert](https://github.com/davidwushi1145/flightAlert)，其上游为 [omegatao/flightAlert](https://github.com/omegatao/flightAlert)。在这个 fork 中相对上游主要做了以下调整：
+
+- **去 GUI 化**：删除 `flight_alert_gui.py` 与 Pillow 等 GUI 依赖，仅保留 CLI 版本。
+- **新增 Cookie 机制**：携程的 `lowestPrice` 接口对无会话请求统一返回 HTTP 432，本项目在 `config.json` 中新增 `cookie` 字段，README 详细说明了从浏览器拿 Cookie 的步骤。
+- **Cookie 失效自检**：连续 3 次 432 后自动停止调用 API，按约 12 小时一次的频率推送"Cookie 可能失效"提醒，避免无效请求和额度浪费。
+- **推送模板从 markdown 切到 html**：解决单 `\n` 不能换行的问题。
+- **多日期合并 + 简洁格式**：同轮所有变化日期合并为一条微信消息，正文为 `日期: 直飞: ¥x, 中转: ¥y`，标题带路线 `出发地 → 到达地 航班价格提醒`。
+- **文档重写**：使用流程、`config.json` 字段详解、拿 Cookie 步骤、推送消息示例都重新整理过。
+
 ## 功能特点
 
 - 支持单程票和往返票的价格监控。
@@ -74,7 +85,7 @@
   "placeFrom": "KMG",
   "placeTo": "TNA",
   "flightWay": "Oneway",
-  "sleepTime": 600,
+  "sleepTime": 3600,
   "priceStep": 50,
   "SCKEY": "你的 pushplus token",
   "cookie": "从浏览器复制的携程 Cookie"
@@ -87,7 +98,7 @@
 - **`placeFrom`**：出发城市的机场代码（见下方机场代码表）。
 - **`placeTo`**：到达城市的机场代码（见下方机场代码表）。
 - **`flightWay`**：机票类型，单程票用 `"Oneway"`，往返票用 `"Roundtrip"`。
-- **`sleepTime`**：查询间隔时间，单位为秒，推荐 `600`（即十分钟查询一次）。
+- **`sleepTime`**：查询间隔时间，单位为秒，推荐 `3600`（即一小时一次）。间隔太短容易被携程反爬触发 432，1 小时是经验上比较稳的值。
 - **`priceStep`**：价格变化的触发阈值。**直飞**和**中转**价格任意一项的变化幅度（绝对值）超过该值时触发微信提醒。设为 `1` 表示任意变化都提醒。
 - **`SCKEY`**：`pushplus` 的 token，详见 [pushplus 文档](https://www.pushplus.plus/doc/)。**留空时仍可监控价格，但不会发送微信通知**。
 - **`cookie`**：携程的会话 Cookie，**必填**（详见下方 *关于携程 Cookie*）。
@@ -153,6 +164,81 @@
 
 更多城市机场代码请参见[完整列表](https://www.iata.org/en/publications/directories/code-search/).
 
+## 部署到服务器持续运行
+
+本项目是一个 `while True` 长进程，最适合用 **systemd**（几乎所有 Linux 发行版自带）托管：开机自启、崩溃自动重启、日志统一收口。
+
+下面给一个最小可用的配置（Ubuntu / Debian 适用，其他发行版把 `apt` 换成对应包管理器即可）：
+
+1. **把项目放到服务器**
+
+   ```bash
+   sudo mkdir -p /opt/flightAlert && sudo chown $USER:$USER /opt/flightAlert
+   cd /opt/flightAlert
+   git clone https://github.com/ye-rm/flightAlert.git .
+   ```
+
+2. **创建虚拟环境并安装依赖**
+
+   ```bash
+   cd /opt/flightAlert
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+3. **编辑 `config.json`**：填好 `cookie`、`SCKEY`、监控日期等。`cookie` 跨 IP 可能失效，如果跑起来仍报 432，按上文 *"关于携程 Cookie"* 流程在服务器上重新抓一次即可。
+
+4. **创建 systemd unit 文件** `/etc/systemd/system/flightalert.service`：
+
+   ```ini
+   [Unit]
+   Description=FlightAlert price monitor
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/opt/flightAlert
+   ExecStart=/opt/flightAlert/.venv/bin/python /opt/flightAlert/flight_alert.py
+   Restart=always
+   RestartSec=10
+   StandardOutput=journal
+   StandardError=journal
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   > 把 `User=ubuntu` 换成你 SSH 登录用的用户名（`echo $USER` 查看）。
+
+5. **启动并设为开机自启**
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now flightalert
+   sudo systemctl status flightalert      # 看到 active (running) 即成功
+   ```
+
+6. **日常运维**
+
+   ```bash
+   # 查看实时日志
+   sudo journalctl -u flightalert -f
+
+   # 停止 / 启动 / 重启
+   sudo systemctl stop flightalert
+   sudo systemctl start flightalert
+   sudo systemctl restart flightalert
+
+   # Cookie 失效告警来了之后：编辑 config.json → 重启服务
+   ```
+
+这样脚本就会 7×24 持续运行，服务器重启后会自动拉起，崩溃后 10 秒内自动重启。日志在 journald 里，统一用 `journalctl` 查看与清理。
+
+> 如果不想用 systemd，只是临时跑：把第 5 步换成 `tmux new -s flightalert 'python flight_alert.py'`，按 `Ctrl+B D` 退出但脚本继续。
+
 ## 注意事项
 
 - 建议监控的日期不要设置太长或已经过期的日期，以免无法获取机票信息。
@@ -161,7 +247,8 @@
 
 ## 参考项目
 
-- 本工具改进自 [flightAlert](https://github.com/omegatao/flightAlert)
+- 上游：[omegatao/flightAlert](https://github.com/omegatao/flightAlert)
+- 本项目 fork 自：[davidwushi1145/flightAlert](https://github.com/davidwushi1145/flightAlert)
 
 ## 版权声明
 
