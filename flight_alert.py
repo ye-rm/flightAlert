@@ -2,7 +2,7 @@ import json
 import os
 import time
 import logging
-from typing import Dict
+from typing import Dict, List
 import sys
 
 import requests
@@ -318,8 +318,16 @@ def fetch_flight_prices(config: dict, direct: bool = True) -> dict:
 def process_price_changes(
         date: str, direct_price: int, non_direct_price: int,
         target_prices: Dict[str, int], no_target_prices: Dict[str, int],
-        config: dict) -> None:
-    """处理价格变化并发送通知
+        config: dict) -> List[str]:
+    """处理价格变化，返回需要推送的通知行。
+
+    该函数只负责：
+    1. 记录日志
+    2. 更新 ``target_prices`` / ``no_target_prices`` 状态
+    3. 返回本次需要推送的一行或多行文本
+
+    实际推送由调用方在收集完所有日期的 ``lines`` 后，统一调用一次
+    ``push_message`` 完成。这样多日期可以合并为一条推送。
 
     Args:
         date: 日期
@@ -328,17 +336,21 @@ def process_price_changes(
         target_prices: 直飞目标价格字典
         no_target_prices: 非直飞目标价格字典
         config: 配置信息
+
+    Returns:
+        List[str]: 本次需要推送的文本行；没有变化时为空列表。
     """
     formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
     logger.info(
         f'{formatted_date} - 直飞: ¥{direct_price}, 非直飞: ¥{non_direct_price}')
 
+    lines: List[str] = []
     if target_prices[date] == 0:
         # 第一次获取价格
         logger.info(f'首次获取 {formatted_date} 的票价')
-        push_message(
-            f'首次提醒: {formatted_date} 的直飞价格 ¥{direct_price}, 非直飞价格 ¥{non_direct_price}',
-            config.get("SCKEY", "")
+        lines.append(
+            f'首次提醒: {formatted_date} 的直飞价格 ¥{direct_price}, '
+            f'非直飞价格 ¥{non_direct_price}'
         )
         target_prices[date] = direct_price
         no_target_prices[date] = non_direct_price
@@ -350,10 +362,9 @@ def process_price_changes(
             logger.info(
                 f'{formatted_date} 直飞价格{change_text} ¥{abs(direct_change)} '
                 f'(¥{target_prices[date]} → ¥{direct_price})')
-            push_message(
+            lines.append(
                 f'{formatted_date} 直飞价格{change_text} ¥{abs(direct_change)}, '
-                f'当前价格: ¥{direct_price}',
-                config.get("SCKEY", "")
+                f'当前价格: ¥{direct_price}'
             )
             target_prices[date] = direct_price
 
@@ -364,12 +375,13 @@ def process_price_changes(
             logger.info(
                 f'{formatted_date} 非直飞价格{change_text} ¥{abs(non_direct_change)} '
                 f'(¥{no_target_prices[date]} → ¥{non_direct_price})')
-            push_message(
+            lines.append(
                 f'{formatted_date} 非直飞价格{change_text} ¥{abs(non_direct_change)}, '
-                f'当前价格: ¥{non_direct_price}',
-                config.get("SCKEY", "")
+                f'当前价格: ¥{non_direct_price}'
             )
             no_target_prices[date] = non_direct_price
+
+    return lines
 
 
 if __name__ == "__main__":
@@ -415,7 +427,8 @@ if __name__ == "__main__":
                 direct_results = direct_data["data"]["oneWayPrice"][0]
                 non_direct_results = non_direct_data["data"]["oneWayPrice"][0]
 
-                # 处理每个日期的价格
+                # 收集本轮所有需要推送的行
+                pending_lines: List[str] = []
                 for date in config["dateToGo"]:
                     if date not in direct_results or date not in non_direct_results:
                         logger.warning(
@@ -425,9 +438,16 @@ if __name__ == "__main__":
                     direct_price = direct_results[date]
                     non_direct_price = non_direct_results[date]
 
-                    process_price_changes(
+                    pending_lines.extend(process_price_changes(
                         date, direct_price, non_direct_price,
                         target_prices, no_target_prices, config
+                    ))
+
+                # 把本轮的所有事件合并成一次推送
+                if pending_lines:
+                    push_message(
+                        "\n".join(pending_lines),
+                        config.get("SCKEY", ""),
                     )
 
                 # 等待下次查询
