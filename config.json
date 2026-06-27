@@ -10,5 +10,6 @@
     "flightWay": "Oneway",
     "sleepTime": 600,
     "priceStep": 50,
-    "SCKEY": ""
+    "SCKEY": "",
+    "cookie": ""
 }

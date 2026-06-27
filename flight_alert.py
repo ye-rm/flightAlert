@@ -24,6 +24,20 @@ PUSHPLUS_URL = "https://www.pushplus.plus/send"
 RETRY_DELAY = 30  # 重试等待时间（秒）
 REQUEST_TIMEOUT = 10  # 请求超时时间（秒）
 
+# 浏览器请求头：携程接口会对没有 UA/Referer/Cookie 的请求返回 432
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Referer": "https://flights.ctrip.com/",
+    "Origin": "https://flights.ctrip.com",
+    "Connection": "keep-alive",
+}
+
 # 机场代码到城市名称的映射
 AIRPORT_CITY_MAP = {
     'BJS': '北京', 'SHA': '上海', 'CAN': '广州', 'SZX': '深圳', 'CTU': '成都', 'HGH': '杭州',
@@ -197,9 +211,18 @@ def fetch_flight_prices(config: dict, direct: bool = True) -> dict:
     if direct:
         params['direct'] = 'true'
 
+    # 合并默认请求头与 config 中可选的自定义请求头/cookie
+    headers = dict(DEFAULT_HEADERS)
+    custom_headers = config.get('headers') or {}
+    if isinstance(custom_headers, dict):
+        headers.update({k: v for k, v in custom_headers.items() if v})
+    cookie = config.get('cookie') or config.get('Cookie')
+    if cookie:
+        headers['Cookie'] = cookie
+
     try:
         response = requests.get(
-            BASE_URL, params=params, timeout=REQUEST_TIMEOUT)
+            BASE_URL, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         data = response.json()
 
