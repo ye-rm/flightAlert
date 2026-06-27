@@ -96,13 +96,23 @@
 
 携程的航班价格接口对未携带会话信息的请求统一返回 HTTP **432**。本工具不会模拟登录获取 Cookie，而是要求你从浏览器复制一份当前有效的会话 Cookie 写入 `config.json`。
 
-获取方式：
+> 实测在携程官网做普通的航班搜索**不一定**会命中本工具使用的 `lowestPrice` 接口，按那个流程拿到的 Cookie 可能不带本接口所需的会话字段。所以推荐下面这条"直接打这个接口"的拿 Cookie 流程。
 
-1. 在 Chrome / Edge 打开 `https://flights.ctrip.com/`，做一次正常的航班搜索（让页面拿到会话 Cookie）
-2. 按 `F12` 打开 DevTools → 切到 **Network** 选项卡
-3. 在网络列表中找到 `itinerary/api/12808/lowestPrice` 这条请求
-4. 在 **Request Headers** 区域找到 `Cookie:`，**右键 → Copy value**
-5. 把整段字符串粘到 `config.json` 的 `"cookie"` 字段（保留双引号）
+具体步骤：
+
+1. 把 `config.json` 的 `"cookie"` 字段留空，先把脚本跑起来。
+2. 携程接口会返回 432。终端或 `flight_alert.log` 里会出现形如下面这样的错误行：
+
+   ```
+   ERROR - 获取直飞航班价格失败: 432 Client Error:  for url: https://flights.ctrip.com/itinerary/api/12808/lowestPrice?flightWay=Oneway&dcity=KMG&acity=TNA&army=false&direct=true
+   ```
+
+3. 复制 `url:` 之后的整段 URL。
+4. 打开 Chrome / Edge，先按 `F12` 打开 DevTools 切到 **Network** 选项卡。
+5. 把刚才复制的 URL 粘到浏览器地址栏回车。浏览器会真实地命中本工具使用的同一个接口并写入有效的 Cookie（浏览器里会直接展示接口返回的 JSON）。
+6. 在 DevTools 的 Network 列表里找到这条 `lowestPrice` 请求，在 **Request Headers** 区域找到 `Cookie:`，**右键 → Copy value**。
+7. 把整段字符串粘到 `config.json` 的 `"cookie"` 字段（保留双引号）。
+8. 重启脚本，正常情况下不再出现 432。
 
 > **注意**
 > - Cookie 会过期，过期后会再次收到 432。当本工具检测到连续 3 次 432 时，会自动停止调用 API 并按约 12 小时一次的频率推送"Cookie 可能失效"提醒。修好 cookie 后重启程序即可恢复。
