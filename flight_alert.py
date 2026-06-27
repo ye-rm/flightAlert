@@ -130,7 +130,10 @@ def push_message(message: str, token: str) -> bool:
         "token": token,
         "title": "航班价格提醒",
         "content": message,
-        "template": "markdown",
+        # pushplus 的 markdown 模板里单 \n 是软换行（不换行），要真正换行得用
+        # html 模板。文档明确："不支持html格式，换行使用\n表示" 适用于 markdown
+        # 模板的反向说明——html 模板下 \n 会被渲染为换行。
+        "template": "html",
     }
     try:
         response = requests.post(
