@@ -24,23 +24,39 @@ PUSHPLUS_URL = "https://www.pushplus.plus/send"
 RETRY_DELAY = 30  # 重试等待时间（秒）
 REQUEST_TIMEOUT = 10  # 请求超时时间（秒）
 
-# Cookie 失效告警相关
-COOKIE_432_THRESHOLD = 3            # 连续出现该次数的 432 即视为 cookie 失效
-COOKIE_ALERT_INTERVAL = 12 * 3600   # cookie 失效提醒的推送间隔（秒，≈每天 2 次）
+# 接口调用失败告警相关
+FAILURE_THRESHOLD = 3             # 连续失败该次数即视为接口异常，进入告警模式
+ALERT_INTERVAL = 12 * 3600        # 告警提醒的推送间隔（秒，≈每天 2 次）
 ALERT_MODE_POLL_INTERVAL = 30 * 60  # 告警模式下，唤醒检查的间隔（秒）
 
-# 浏览器请求头：携程接口会对没有 UA/Referer/Cookie 的请求返回 432
+# 浏览器请求头：按浏览器实际抓包还原，无需 Cookie 也能正常访问
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
+        "Chrome/148.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Referer": "https://flights.ctrip.com/",
-    "Origin": "https://flights.ctrip.com",
-    "Connection": "keep-alive",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,"
+        "application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Dnt": "1",
+    "Priority": "u=0, i",
+    "Sec-Ch-Ua": (
+        '"Chromium";v="148", "Google Chrome";v="148", '
+        '"Not/A)Brand";v="99"'
+    ),
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-Gpc": "1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 # 机场代码到城市名称的映射
@@ -165,56 +181,56 @@ def push_message(message: str, token: str, title: str = "航班价格提醒") ->
         return False
 
 
-# 携程接口返回 432 几乎总是 cookie/会话失效；用连续计数 + 告警模式来兜底
-_cookie_alert_state = {
-    "consecutive_432": 0,    # 连续 432 计数
-    "alert_mode": False,     # True 时停止调用携程 API，只推送 cookie 失效告警
-    "last_alert_ts": 0.0,    # 上次推送 cookie 告警的时间戳（time.time()）
+# 携程接口连续调用失败时，用计数 + 告警模式兜底，避免无效请求浪费额度
+_api_alert_state = {
+    "consecutive_failures": 0,  # 连续失败计数
+    "alert_mode": False,        # True 时停止调用携程 API，只推送告警
+    "last_alert_ts": 0.0,       # 上次推送告警的时间戳（time.time()）
 }
 
 
 def _record_api_success() -> None:
-    """API 调用成功时调用：清空 432 计数并退出告警模式。"""
-    state = _cookie_alert_state
-    if state["alert_mode"] or state["consecutive_432"]:
-        logger.info("携程接口调用恢复正常，退出 cookie 告警模式")
-    state["consecutive_432"] = 0
+    """API 调用成功时调用：清空失败计数并退出告警模式。"""
+    state = _api_alert_state
+    if state["alert_mode"] or state["consecutive_failures"]:
+        logger.info("携程接口调用恢复正常，退出告警模式")
+    state["consecutive_failures"] = 0
     state["alert_mode"] = False
 
 
-def _record_432_error() -> None:
-    """API 返回 432 时调用：累计计数；首次达到阈值时进入告警模式。"""
-    state = _cookie_alert_state
-    state["consecutive_432"] += 1
-    if not state["alert_mode"] and state["consecutive_432"] >= COOKIE_432_THRESHOLD:
+def _record_api_failure() -> None:
+    """API 调用失败时调用：累计计数；首次达到阈值时进入告警模式。"""
+    state = _api_alert_state
+    state["consecutive_failures"] += 1
+    if not state["alert_mode"] and state["consecutive_failures"] >= FAILURE_THRESHOLD:
         state["alert_mode"] = True
-        # 强制让首次告警立刻发出，不受 COOKIE_ALERT_INTERVAL 节流
+        # 强制让首次告警立刻发出，不受 ALERT_INTERVAL 节流
         state["last_alert_ts"] = 0.0
         logger.warning(
-            "已连续 %d 次请求返回 432，疑似 cookie 失效，"
-            "进入告警模式（暂停调用携程 API，仅推送告警）",
-            state["consecutive_432"],
+            "已连续 %d 次请求携程接口失败，进入告警模式"
+            "（暂停调用携程 API，仅推送告警）",
+            state["consecutive_failures"],
         )
 
 
-def _try_send_cookie_alert(config: dict) -> None:
-    """在告警模式下按 COOKIE_ALERT_INTERVAL 节流推送 cookie 失效提醒。"""
-    state = _cookie_alert_state
+def _try_send_alert(config: dict) -> None:
+    """在告警模式下按 ALERT_INTERVAL 节流推送接口失败提醒。"""
+    state = _api_alert_state
     if not state["alert_mode"]:
         return
     now = time.time()
-    if state["last_alert_ts"] and (now - state["last_alert_ts"]) < COOKIE_ALERT_INTERVAL:
+    if state["last_alert_ts"] and (now - state["last_alert_ts"]) < ALERT_INTERVAL:
         return
     msg = (
-        f"【航班监控告警】携程接口已连续 {state['consecutive_432']} 次返回 432，"
-        "Cookie 可能已失效，请尽快更新 config.json 中的 cookie 字段。"
-        "在 cookie 修复前，监控已暂停调用携程 API，仅保留此告警推送。"
+        f"【航班监控告警】携程接口已连续 {state['consecutive_failures']} 次调用失败，"
+        "监控已暂停调用携程 API，仅保留此告警推送。"
+        "请检查网络或接口是否可用，恢复后重启程序即可。"
     )
     if push_message(msg, config.get("SCKEY", "")):
         state["last_alert_ts"] = now
-        logger.info("Cookie 失效告警已推送")
+        logger.info("接口失败告警已推送")
     else:
-        logger.error("Cookie 失效告警推送失败")
+        logger.error("接口失败告警推送失败")
 
 
 def load_config() -> dict:
@@ -295,14 +311,11 @@ def fetch_flight_prices(config: dict, direct: bool = True) -> dict:
     if direct:
         params['direct'] = 'true'
 
-    # 合并默认请求头与 config 中可选的自定义请求头/cookie
+    # 合并默认请求头与 config 中可选的自定义请求头
     headers = dict(DEFAULT_HEADERS)
     custom_headers = config.get('headers') or {}
     if isinstance(custom_headers, dict):
         headers.update({k: v for k, v in custom_headers.items() if v})
-    cookie = config.get('cookie') or config.get('Cookie')
-    if cookie:
-        headers['Cookie'] = cookie
 
     try:
         response = requests.get(
@@ -399,7 +412,7 @@ if __name__ == "__main__":
         # 读取配置文件
         config = load_config()
         logger.info("航班价格监控程序启动")
-        
+
         # 显示监控路线，使用可读的城市名称
         place_from = config['placeFrom']
         place_to = config['placeTo']
@@ -415,11 +428,11 @@ if __name__ == "__main__":
             date: 0 for date in config["dateToGo"]}
 
         while True:
-            # 告警模式：暂停调用携程 API，仅按节奏推送 cookie 失效告警
-            if _cookie_alert_state["alert_mode"]:
-                _try_send_cookie_alert(config)
+            # 告警模式：暂停调用携程 API，仅按节奏推送接口失败告警
+            if _api_alert_state["alert_mode"]:
+                _try_send_alert(config)
                 logger.info(
-                    "处于 cookie 告警模式，%d 分钟后再次检查",
+                    "处于接口告警模式，%d 分钟后再次检查",
                     ALERT_MODE_POLL_INTERVAL // 60,
                 )
                 time.sleep(ALERT_MODE_POLL_INTERVAL)
@@ -465,21 +478,11 @@ if __name__ == "__main__":
                 logger.info(f'本轮查询完毕，等待 {config["sleepTime"]} 秒后继续')
                 time.sleep(config["sleepTime"])
 
-            except requests.exceptions.HTTPError as e:
-                # 432：疑似 cookie 失效，进入累计 / 告警逻辑
-                if e.response is not None and e.response.status_code == 432:
-                    _record_432_error()
-                    # 达到阈值时 _record_432_error 会立即触发首次告警
-                    _try_send_cookie_alert(config)
-                else:
-                    # 其他 HTTP 错误（如 5xx）不算 cookie 问题，重置计数
-                    _record_api_success()
-                logger.error(f"查询过程中出错: {e}")
-                logger.info(f"等待 {RETRY_DELAY} 秒后重试")
-                time.sleep(RETRY_DELAY)
             except (requests.exceptions.RequestException,
                     ValueError, KeyError) as e:
-                # 网络层异常 / 解析异常：不重置 432 计数（cookie 可能仍有问题）
+                # 任意一次调用失败都计入连续失败计数；达到阈值后进入告警模式
+                _record_api_failure()
+                _try_send_alert(config)
                 logger.error(f"查询过程中出错: {e}")
                 logger.info(f"等待 {RETRY_DELAY} 秒后重试")
                 time.sleep(RETRY_DELAY)
@@ -489,4 +492,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"程序运行出错: {e}", exc_info=True)
         sys.exit(1)
-
