@@ -43,3 +43,4 @@ Thumbs.db
 *.exe
 *.log
 config_backup.json
+.venv/
